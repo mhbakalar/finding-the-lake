@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Finding the Lakes!</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #fffaf0;
+    font-family: "Comic Sans MS", "Marker Felt", cursive;
+    overflow: hidden;
+    height: 100%;
+  }
+  #wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    flex-direction: column;
+  }
+  canvas {
+    background: #fff8e7;
+    border: 4px solid #333;
+    border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+    image-rendering: pixelated;
+  }
+  #hud {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    color: #222;
+    pointer-events: none;
+    font-size: 18px;
+    text-shadow: 1px 1px 0 #fff;
+  }
+  #hud b { color: #c2185b; }
+  #help {
+    position: fixed;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #444;
+    font-size: 14px;
+    background: rgba(255,255,255,0.7);
+    padding: 6px 14px;
+    border-radius: 20px;
+  }
+  #title-screen, #end-screen {
+    position: fixed;
+    inset: 0;
+    background: #fff8e7;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    z-index: 10;
+  }
+  #title-screen h1 {
+    font-size: 64px;
+    margin: 0;
+    color: #d81b60;
+    text-shadow: 3px 3px 0 #ffeb3b, 6px 6px 0 #4fc3f7;
+    transform: rotate(-3deg);
+  }
+  #title-screen p { font-size: 20px; color: #444; max-width: 600px; }
+  button {
+    font-family: inherit;
+    font-size: 22px;
+    padding: 10px 28px;
+    border: 3px solid #333;
+    border-radius: 30px;
+    background: #ffeb3b;
+    cursor: pointer;
+    margin-top: 18px;
+    transform: rotate(-1deg);
+  }
+  button:hover { background: #fff176; transform: rotate(1deg) scale(1.05); }
+  #end-screen { display: none; }
+  #end-screen h1 { font-size: 56px; color: #2e7d32; text-shadow: 2px 2px 0 #fff59d; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<div id="hud"></div>
+<div id="help">← → move &nbsp;·&nbsp; ↑ / Space jump (press again in air for double jump!) &nbsp;·&nbsp; Tab switch girl &nbsp;·&nbsp; E sleep in tent</div>
+
+<div id="title-screen">
+  <h1>Finding the Lakes!</h1>
+  <p>Lehvi and Leah are exploring the wild to find every secret lake. They have backpacks of gear and a tent for three nights and days. Will you help them?</p>
+  <button id="start-btn">Start Adventure</button>
+</div>
+
+<div id="end-screen">
+  <h1 id="end-title">You Found All the Lakes!</h1>
+  <p id="end-msg">Lehvi and Leah pack up their tent and head home. The animals wave goodbye.</p>
+  <button id="restart-btn">Play Again</button>
+</div>
+
+<script>
+// ========================================================================
+// FINDING THE LAKES!
+// A side-scroll picture-book game inspired by a child's drawing.
+// ========================================================================
+
+const cvs = document.getElementById("game");
+const ctx = cvs.getContext("2d");
+const W = cvs.width, H = cvs.height;
+
+// ---------- INPUT ----------
+const keys = {};
+let jumpPressed = false;  // edge-triggered: true for one frame on jump keydown
+window.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (["arrowup","arrowdown","arrowleft","arrowright"," ","tab"].includes(k)) e.preventDefault();
+  // Edge detect jump only on the actual press (not key repeat)
+  if ((k === "arrowup" || k === "w" || k === " ") && !keys[k]) jumpPressed = true;
+  keys[k] = true;
+  if (k === "tab") swapActive();
+  if (k === "e") tryUseTent();
+});
+window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+
+// ---------- GAME STATE ----------
+const state = {
+  level: 1,
+  time: 8.0,           // hours; 6.0 sunrise, 20.0 sunset
+  day: 1,
+  maxDays: 3,
+  camera: 0,
+  active: 0,           // 0 = Lehvi, 1 = Leah
+  message: null,
+  messageT: 0,
+  paused: false,
+  sleeping: false,
+  sleepT: 0,
+  ended: false,
+};
+
+// ---------- CHARACTERS ----------
+function makeGirl(x, name, dressColor, hairColor) {
+  return {
+    name, x, y: 300, vx: 0, vy: 0, w: 22, h: 44,
+    dress: dressColor, hair: hairColor,
+    facing: 1, onGround: false, walkT: 0, stuck: 0,
+    jumpsLeft: 2, sparkles: [],
+  };
+}
+let girls = [
+  makeGirl(120, "Lehvi", "#ec407a", "#f57c00"),  // pink dress, orange hair
+  makeGirl(160, "Leah",  "#1e88e5", "#212121"),  // blue dress, black hair
+];
+
+// ---------- LEVEL DATA ----------
+// A level is a series of "platforms" plus lakes, hazards, animals, and a tent spot.
+function buildLevel(n) {
+  // Common ground band y
+  const groundY = 420;
+  let platforms = [];
+  let lakes = [];
+  let hazards = []; // { type:'hole'|'quicksand', x, w }
+  let animals = [];
+  let tent = null;
+  let levelEnd = 0;
+
+  if (n === 1) {
+    // Level 1: smooth grass with three lakes
+    levelEnd = 2800;
+    platforms.push({ x: 0, y: groundY, w: levelEnd, h: 120, kind: "grass" });
+    lakes.push(makeLake(550, groundY, 180, true));
+    lakes.push(makeLake(1300, groundY, 220, true));
+    lakes.push(makeLake(2150, groundY, 200, false));
+    animals.push(makeAnimal("rabbit", 700, groundY));
+    animals.push(makeAnimal("fox", 1500, groundY));
+    animals.push(makeAnimal("rabbit", 2300, groundY));
+    tent = { x: 2600, y: groundY, used: false };
+  }
+  else if (n === 2) {
+    // Level 2: grass + stepping stones over water
+    levelEnd = 3400;
+    // Ground segments separated by water gaps
+    platforms.push({ x: 0,    y: groundY, w: 700,  h: 120, kind: "grass" });
+    platforms.push({ x: 1100, y: groundY, w: 600,  h: 120, kind: "grass" });
+    platforms.push({ x: 2100, y: groundY, w: 500,  h: 120, kind: "grass" });
+    platforms.push({ x: 2900, y: groundY, w: 500,  h: 120, kind: "grass" });
+    // Stepping stones across the gaps
+    addStones(platforms, 720, 1080, groundY, 4);
+    addStones(platforms, 1720, 2080, groundY, 4);
+    addStones(platforms, 2620, 2880, groundY, 3);
+    // Lakes (shallow blue patches on the grass — fish only)
+    lakes.push(makeLake(300, groundY, 200, true));
+    lakes.push(makeLake(1300, groundY, 220, true));
+    lakes.push(makeLake(2250, groundY, 200, true));
+    lakes.push(makeLake(3050, groundY, 220, false));
+    animals.push(makeAnimal("frog", 400, groundY));
+    animals.push(makeAnimal("deer", 1450, groundY));
+    animals.push(makeAnimal("frog", 2300, groundY));
+    animals.push(makeAnimal("deer", 3100, groundY));
+    tent = { x: 3250, y: groundY, used: false };
+  }
+  else {
+    // Level 3: grass + stones + holes + quicksand
+    levelEnd = 4200;
+    platforms.push({ x: 0,    y: groundY, w: 600, h: 120, kind: "grass" });
+    platforms.push({ x: 800,  y: groundY, w: 500, h: 120, kind: "grass" });
+    platforms.push({ x: 1450, y: groundY, w: 700, h: 120, kind: "grass" });
+    platforms.push({ x: 2300, y: groundY, w: 600, h: 120, kind: "grass" });
+    platforms.push({ x: 3050, y: groundY, w: 500, h: 120, kind: "grass" });
+    platforms.push({ x: 3700, y: groundY, w: 500, h: 120, kind: "grass" });
+    // Stones over hole-gaps
+    addStones(platforms, 620, 780, groundY, 3);
+    addStones(platforms, 2150, 2280, groundY, 3);
+    addStones(platforms, 3550, 3680, groundY, 3);
+    // Holes (visual + lethal). The platform gap from 1300->1450 is the big hole.
+    hazards.push({ type:"hole", x: 1300, w: 150 });
+    hazards.push({ type:"hole", x: 2900, w: 150 });
+    // Quicksand patches — slow you and stick
+    hazards.push({ type:"quicksand", x: 950,  w: 90 });
+    hazards.push({ type:"quicksand", x: 1700, w: 110 });
+    hazards.push({ type:"quicksand", x: 3200, w: 100 });
+    // Lakes
+    lakes.push(makeLake(200, groundY, 220, true));
+    lakes.push(makeLake(1550, groundY, 240, true));
+    lakes.push(makeLake(2400, groundY, 220, true));
+    lakes.push(makeLake(3100, groundY, 200, true));
+    lakes.push(makeLake(3850, groundY, 240, false));
+    animals.push(makeAnimal("bear", 300, groundY));
+    animals.push(makeAnimal("duck", 1650, groundY));
+    animals.push(makeAnimal("frog", 2470, groundY));
+    animals.push(makeAnimal("bear", 3200, groundY));
+    animals.push(makeAnimal("duck", 3950, groundY));
+    tent = { x: 4050, y: groundY, used: false };
+  }
+
+  return { n, platforms, lakes, hazards, animals, tent, levelEnd, groundY };
+}
+
+function addStones(platforms, x0, x1, groundY, count) {
+  const gap = (x1 - x0) / count;
+  for (let i = 0; i < count; i++) {
+    const sx = x0 + i * gap + gap/2 - 25;
+    const sy = groundY - 18 - (i % 2 === 0 ? 0 : 10);
+    platforms.push({ x: sx, y: sy, w: 50, h: 18, kind: "stone" });
+  }
+}
+
+function makeLake(x, groundY, w, hasFish) {
+  return {
+    x, y: groundY - 6, w, h: 28, found: false, hasFish,
+    fish: Array.from({length: hasFish ? 3 : 0}, (_, i) => ({
+      t: Math.random()*Math.PI*2,
+      ox: Math.random()*w*0.7 + w*0.15,
+      depth: 8 + Math.random()*10,
+      color: ["#ff7043","#ffd54f","#ba68c8"][i%3]
+    }))
+  };
+}
+
+function makeAnimal(kind, x, groundY) {
+  const sizes = {
+    rabbit: { w:24, h:18, color:"#fafafa", earC:"#f8bbd0" },
+    fox:    { w:34, h:20, color:"#ef6c00", earC:"#5d4037" },
+    frog:   { w:24, h:18, color:"#43a047", earC:"#2e7d32" },
+    deer:   { w:38, h:32, color:"#a1887f", earC:"#5d4037" },
+    bear:   { w:44, h:34, color:"#4e342e", earC:"#3e2723" },
+    duck:   { w:26, h:20, color:"#fff59d", earC:"#ff8f00" },
+  };
+  const s = sizes[kind];
+  return {
+    kind, x, y: groundY - s.h, w: s.w, h: s.h,
+    color: s.color, accent: s.earC,
+    vx: (Math.random()<0.5?-1:1)*0.6, hop: 0,
+    homeX: x, range: 120,
+  };
+}
+
+let level = buildLevel(1);
+
+// ---------- GAME LOGIC ----------
+function update(dt) {
+  if (state.paused || state.ended) return;
+
+  // Time of day
+  if (state.sleeping) {
+    state.sleepT += dt;
+    state.time += dt * 6;  // 6 hours per real second while sleeping
+    if (state.time >= 30) state.time -= 24;
+    if (state.time >= 6.5 && state.time < 18) {
+      state.sleeping = false;
+      flash(`Day ${state.day} — Good morning!`);
+    }
+  } else {
+    state.time += dt * 0.4;  // ~25s = 1 in-game hour
+    if (state.time >= 24) state.time -= 24;
+  }
+
+  // Update girls
+  const a = girls[state.active];
+  const b = girls[1 - state.active];
+
+  // Active girl input
+  let ax = 0;
+  if (keys["arrowleft"]  || keys["a"]) ax -= 1;
+  if (keys["arrowright"] || keys["d"]) ax += 1;
+
+  const inSand = inQuicksand(a);
+  const speed = inSand ? 0.4 : 2.4;
+  a.vx = ax * speed;
+  if (ax !== 0) a.facing = ax;
+  a.walkT += Math.abs(a.vx) * dt * 8;
+
+  // Double jump: first jump from ground, second jump in mid-air for extra distance
+  if (jumpPressed && !inSand && a.jumpsLeft > 0) {
+    // Second (air) jump gives a slightly weaker pop but resets vy to extend airtime
+    a.vy = a.onGround ? -9 : -8;
+    if (!a.onGround) {
+      // sparkle puff on the air jump
+      for (let i = 0; i < 6; i++) {
+        a.sparkles.push({
+          x: a.x + a.w/2 + (Math.random()-0.5)*10,
+          y: a.y + a.h - 2,
+          vx: (Math.random()-0.5)*2,
+          vy: 1 + Math.random()*1.5,
+          life: 0.5,
+        });
+      }
+    }
+    a.onGround = false;
+    a.jumpsLeft -= 1;
+  }
+  jumpPressed = false;
+
+  // Companion follows
+  followCompanion(b, a, dt);
+
+  for (const g of girls) physicsGirl(g, dt);
+
+  // Update sparkles
+  for (const g of girls) {
+    for (const s of g.sparkles) {
+      s.x += s.vx; s.y += s.vy; s.life -= dt;
+    }
+    g.sparkles = g.sparkles.filter(s => s.life > 0);
+  }
+
+  // Animals
+  for (const an of level.animals) updateAnimal(an, dt);
+
+  // Lake discovery
+  for (const lk of level.lakes) {
+    if (!lk.found) {
+      for (const g of girls) {
+        if (g.x + g.w > lk.x && g.x < lk.x + lk.w && g.y + g.h > lk.y - 4) {
+          lk.found = true;
+          flash("✨ Found a lake!");
+        }
+      }
+    }
+    for (const f of lk.fish) f.t += dt * 1.5;
+  }
+
+  // Camera follows active girl
+  const target = a.x - W * 0.4;
+  state.camera += (target - state.camera) * 0.08;
+  if (state.camera < 0) state.camera = 0;
+  if (state.camera > level.levelEnd - W) state.camera = level.levelEnd - W;
+
+  // Death from holes
+  for (const g of girls) {
+    if (g.y > H + 50) {
+      respawn(g);
+      flash("Whoa! Careful of the big holes!");
+    }
+  }
+
+  // Level complete check (all lakes found and tent used by night)
+  const allFound = level.lakes.every(l => l.found);
+  if (allFound && level.tent && level.tent.used && !state.sleeping) {
+    // Advance level on next morning if it's a new day
+  }
+
+  if (state.messageT > 0) state.messageT -= dt;
+}
+
+function physicsGirl(g, dt) {
+  g.x += g.vx;
+  g.vy += 0.45;
+  if (g.vy > 14) g.vy = 14;
+  g.y += g.vy;
+  g.onGround = false;
+
+  // Quicksand sinks slowly
+  if (inQuicksand(g)) {
+    g.vy = Math.min(g.vy, 0.6);
+    g.stuck = 1;
+  }
+
+  // Collide with platforms
+  for (const p of level.platforms) {
+    if (g.x + g.w > p.x && g.x < p.x + p.w &&
+        g.y + g.h > p.y && g.y + g.h < p.y + 26 + Math.max(0, g.vy)) {
+      if (g.vy >= 0) {
+        g.y = p.y - g.h;
+        g.vy = 0;
+        g.onGround = true;
+        g.jumpsLeft = 2;
+      }
+    }
+  }
+
+  // Bound
+  if (g.x < 0) g.x = 0;
+  if (g.x + g.w > level.levelEnd) g.x = level.levelEnd - g.w;
+}
+
+function inQuicksand(g) {
+  for (const h of level.hazards) {
+    if (h.type !== "quicksand") continue;
+    if (g.x + g.w > h.x && g.x < h.x + h.w && g.y + g.h > level.groundY - 4) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function followCompanion(b, a, dt) {
+  const dx = a.x - b.x;
+  const dist = Math.abs(dx);
+  let bx = 0;
+  if (dist > 70) bx = Math.sign(dx) * 1.8;
+  else if (dist > 40) bx = Math.sign(dx) * 0.6;
+  // Hop if leader is higher
+  if (a.y < b.y - 10 && b.onGround && Math.random() < 0.05) {
+    b.vy = -9; b.jumpsLeft = 1;
+  }
+  // Try to jump over gaps in front
+  const aheadX = b.x + (bx>0 ? b.w + 18 : -18);
+  if (b.onGround && bx !== 0 && !groundAt(aheadX, b.y + b.h + 4)) {
+    b.vy = -9; b.jumpsLeft = 1; b.onGround = false;
+  }
+  // Mid-air double jump if we're falling toward a gap and still need horizontal distance
+  if (!b.onGround && b.vy > 0 && b.jumpsLeft > 0 && bx !== 0) {
+    const farAhead = b.x + (bx>0 ? b.w + 30 : -30);
+    if (!groundAt(farAhead, b.y + b.h + 8)) {
+      b.vy = -8;
+      b.jumpsLeft -= 1;
+    }
+  }
+  if (inQuicksand(b)) bx *= 0.2;
+  b.vx = bx;
+  if (bx !== 0) b.facing = Math.sign(bx);
+  b.walkT += Math.abs(b.vx) * dt * 8;
+}
+
+function groundAt(x, y) {
+  for (const p of level.platforms) {
+    if (x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h) return true;
+  }
+  return false;
+}
+
+function updateAnimal(an, dt) {
+  // Walk back and forth within range
+  an.x += an.vx;
+  if (an.x < an.homeX - an.range) an.vx = Math.abs(an.vx);
+  if (an.x > an.homeX + an.range) an.vx = -Math.abs(an.vx);
+  // Frogs and rabbits hop
+  if (an.kind === "rabbit" || an.kind === "frog") {
+    an.hop = (an.hop + dt*4) % (Math.PI*2);
+  }
+}
+
+function respawn(g) {
+  g.x = Math.max(40, state.camera + 80);
+  g.y = level.groundY - g.h - 10;
+  g.vx = g.vy = 0;
+}
+
+function swapActive() {
+  state.active = 1 - state.active;
+  flash(`Now playing ${girls[state.active].name}`);
+}
+
+function tryUseTent() {
+  if (!level.tent) return;
+  const a = girls[state.active];
+  const tx = level.tent.x;
+  if (Math.abs((a.x + a.w/2) - (tx + 30)) > 60) {
+    flash("Walk to the tent first!");
+    return;
+  }
+  if (state.time < 19 && state.time > 6.5) {
+    flash("It's still day. Find lakes first!");
+    return;
+  }
+  const allFound = level.lakes.every(l => l.found);
+  if (!allFound) {
+    flash("Find every lake before sleeping!");
+    return;
+  }
+  level.tent.used = true;
+  state.sleeping = true;
+  flash("Zzz... sleeping in the tent...");
+  // Schedule level transition after sleep
+  setTimeout(() => {
+    state.day += 1;
+    if (state.level < 3) {
+      state.level += 1;
+      level = buildLevel(state.level);
+      for (const g of girls) { g.x = 80 + Math.random()*60; g.y = 200; g.vy = 0; }
+      state.camera = 0;
+      flash(`Level ${state.level}!`);
+    } else {
+      // All three nights done — game complete
+      state.ended = true;
+      document.getElementById("end-screen").style.display = "flex";
+    }
+  }, 2000);
+}
+
+function flash(msg) {
+  state.message = msg;
+  state.messageT = 2.6;
+}
+
+// ---------- RENDER ----------
+function render() {
+  // Sky color by time of day
+  const sky = skyColor(state.time);
+  ctx.fillStyle = sky.top;
+  ctx.fillRect(0, 0, W, H);
+  // gradient feel
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0, sky.top);
+  grad.addColorStop(0.6, sky.mid);
+  grad.addColorStop(1, sky.bot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Sun / moon
+  drawSunMoon();
+
+  // Distant hills (parallax)
+  drawHills();
+
+  ctx.save();
+  ctx.translate(-state.camera, 0);
+
+  // Hazards (behind ground edge)
+  drawHazards();
+
+  // Platforms
+  for (const p of level.platforms) drawPlatform(p);
+
+  // Lakes
+  for (const lk of level.lakes) drawLake(lk);
+
+  // Animals
+  for (const an of level.animals) drawAnimal(an);
+
+  // Tent
+  if (level.tent) drawTent(level.tent);
+
+  // Girls
+  for (let i=0;i<girls.length;i++) drawGirl(girls[i], i === state.active);
+
+  // Sparkles for double jump
+  for (const g of girls) {
+    for (const s of g.sparkles) {
+      ctx.globalAlpha = Math.max(0, s.life / 0.5);
+      ctx.fillStyle = "#ffeb3b";
+      ctx.beginPath(); ctx.arc(s.x, s.y, 2.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(s.x, s.y, 1, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+
+  // Sleep overlay
+  if (state.sleeping) {
+    ctx.fillStyle = "rgba(20,20,60,0.55)";
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = "#fff";
+    ctx.font = "48px Comic Sans MS";
+    ctx.textAlign = "center";
+    ctx.fillText("Z z z . . .", W/2, H/2);
+    ctx.textAlign = "left";
+  }
+
+  // Message
+  if (state.messageT > 0 && state.message) {
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    const w = ctx.measureText(state.message).width;
+    ctx.font = "22px Comic Sans MS";
+    const mw = ctx.measureText(state.message).width + 40;
+    ctx.fillRect(W/2 - mw/2, 60, mw, 38);
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(W/2 - mw/2, 60, mw, 38);
+    ctx.fillStyle = "#222";
+    ctx.textAlign = "center";
+    ctx.fillText(state.message, W/2, 86);
+    ctx.textAlign = "left";
+  }
+}
+
+function skyColor(t) {
+  // Map hours to interpolated sky.
+  // night 0-5, dawn 5-7, day 7-18, dusk 18-20, night 20-24
+  function mix(c1, c2, k) {
+    return `rgb(${Math.round(c1[0]+(c2[0]-c1[0])*k)},${Math.round(c1[1]+(c2[1]-c1[1])*k)},${Math.round(c1[2]+(c2[2]-c1[2])*k)})`;
+  }
+  const night = [25, 25, 70];
+  const dawn = [255, 180, 130];
+  const day  = [135, 206, 250];
+  const dusk = [255, 110, 90];
+  let topC, midC, botC;
+  if (t < 5) { topC = night; }
+  else if (t < 7) { topC = lerp3(night, dawn, (t-5)/2); }
+  else if (t < 17) { topC = day; }
+  else if (t < 20) { topC = lerp3(day, dusk, (t-17)/3); }
+  else { topC = lerp3(dusk, night, Math.min(1,(t-20)/2)); }
+  return {
+    top: rgb(topC),
+    mid: rgb(lerp3(topC, [255,250,235], 0.4)),
+    bot: rgb([255,248,220])
+  };
+}
+function lerp3(a,b,k){return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k];}
+function rgb(c){return `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;}
+
+function drawSunMoon() {
+  // Sun arcs from x=0 at t=6 to x=W at t=18
+  const t = state.time;
+  let frac = (t - 6) / 12; // 0..1 day
+  if (frac >= 0 && frac <= 1) {
+    const sx = frac * W;
+    const sy = 120 - Math.sin(frac*Math.PI)*80;
+    ctx.fillStyle = "#ffd54f";
+    ctx.beginPath(); ctx.arc(sx, sy, 32, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#fb8c00"; ctx.lineWidth = 3; ctx.stroke();
+  } else {
+    // Moon
+    let nf;
+    if (t > 18) nf = (t - 18) / 12;
+    else nf = (t + 6) / 12; // before 6
+    if (nf > 1) nf = 1;
+    const mx = nf * W;
+    const my = 130 - Math.sin(nf*Math.PI)*70;
+    ctx.fillStyle = "#fff9c4";
+    ctx.beginPath(); ctx.arc(mx, my, 26, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.15)";
+    ctx.beginPath(); ctx.arc(mx-8, my-4, 6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx+6, my+8, 4, 0, Math.PI*2); ctx.fill();
+    // Stars
+    ctx.fillStyle = "#fff";
+    for (let i=0;i<40;i++) {
+      const sx = (i*173 % W);
+      const sy = (i*97 % 200);
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+  }
+}
+
+function drawHills() {
+  ctx.save();
+  ctx.translate(-state.camera*0.3, 0);
+  ctx.fillStyle = "#7cb342";
+  for (let i=-1; i<8; i++) {
+    const x = i*420;
+    ctx.beginPath();
+    ctx.moveTo(x, 360);
+    ctx.quadraticCurveTo(x+200, 240, x+400, 360);
+    ctx.lineTo(x+400, 420);
+    ctx.lineTo(x, 420);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.fillStyle = "#558b2f";
+  for (let i=-1; i<8; i++) {
+    const x = i*620 + 200;
+    ctx.beginPath();
+    ctx.moveTo(x, 380);
+    ctx.quadraticCurveTo(x+250, 280, x+500, 380);
+    ctx.lineTo(x+500, 420);
+    ctx.lineTo(x, 420);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPlatform(p) {
+  if (p.kind === "grass") {
+    // dirt body
+    ctx.fillStyle = "#8d6e63";
+    ctx.fillRect(p.x, p.y + 14, p.w, p.h - 14);
+    // grass top
+    ctx.fillStyle = "#66bb6a";
+    ctx.fillRect(p.x, p.y, p.w, 16);
+    // grass tufts (crayon style)
+    ctx.strokeStyle = "#2e7d32";
+    ctx.lineWidth = 2;
+    for (let i=0;i<p.w;i+=14) {
+      ctx.beginPath();
+      ctx.moveTo(p.x+i, p.y+2);
+      ctx.lineTo(p.x+i+3, p.y-6);
+      ctx.lineTo(p.x+i+6, p.y+2);
+      ctx.stroke();
+    }
+  } else if (p.kind === "stone") {
+    ctx.fillStyle = "#9e9e9e";
+    ctx.beginPath();
+    ctx.ellipse(p.x + p.w/2, p.y + p.h/2, p.w/2, p.h/2, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = "#424242";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#bdbdbd";
+    ctx.beginPath();
+    ctx.ellipse(p.x + p.w/2 - 4, p.y + p.h/2 - 3, p.w/3, p.h/4, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawHazards() {
+  for (const h of level.hazards) {
+    if (h.type === "hole") {
+      // black hole through the ground
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(h.x, level.groundY, h.w, 200);
+      // jagged edge
+      ctx.fillStyle = "#3e2723";
+      ctx.beginPath();
+      ctx.moveTo(h.x, level.groundY);
+      for (let i=0;i<6;i++) {
+        ctx.lineTo(h.x + (h.w/6)*(i+1), level.groundY + (i%2===0?12:4));
+      }
+      ctx.lineTo(h.x+h.w, level.groundY);
+      ctx.fill();
+    } else if (h.type === "quicksand") {
+      ctx.fillStyle = "#d7a86e";
+      ctx.fillRect(h.x, level.groundY-2, h.w, 24);
+      ctx.fillStyle = "#a87c4a";
+      for (let i=0;i<h.w;i+=10) {
+        ctx.beginPath();
+        ctx.arc(h.x + i + 5, level.groundY + 6 + Math.sin((Date.now()/300)+i)*2, 3, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.fillStyle = "#5d4037";
+      ctx.font = "12px Comic Sans MS";
+      ctx.fillText("quicksand!", h.x + 4, level.groundY - 6);
+    }
+  }
+}
+
+function drawLake(lk) {
+  // Water
+  ctx.fillStyle = lk.found ? "#42a5f5" : "#1976d2";
+  ctx.beginPath();
+  ctx.ellipse(lk.x + lk.w/2, lk.y + 14, lk.w/2, 14, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = "#0d47a1";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Highlight
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.beginPath();
+  ctx.ellipse(lk.x + lk.w/2 - 20, lk.y + 8, lk.w/4, 3, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Fish
+  for (const f of lk.fish) {
+    const fx = lk.x + f.ox + Math.sin(f.t)*20;
+    const fy = lk.y + f.depth;
+    ctx.fillStyle = f.color;
+    ctx.beginPath();
+    ctx.ellipse(fx, fy, 6, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+    // tail
+    ctx.beginPath();
+    ctx.moveTo(fx-6, fy);
+    ctx.lineTo(fx-10, fy-3);
+    ctx.lineTo(fx-10, fy+3);
+    ctx.closePath();
+    ctx.fill();
+    // eye
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(fx+3, fy-1, 1.4, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Sparkle if found
+  if (lk.found) {
+    const sp = Math.sin(Date.now()/200) * 2;
+    ctx.fillStyle = "#ffeb3b";
+    ctx.font = "bold 16px Comic Sans MS";
+    ctx.fillText("✓ found!", lk.x + lk.w/2 - 28, lk.y - 10 + sp);
+  } else {
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.font = "14px Comic Sans MS";
+    ctx.fillText("a hidden lake?", lk.x + lk.w/2 - 50, lk.y - 8);
+  }
+}
+
+function drawAnimal(an) {
+  const x = an.x, y = an.y;
+  const facing = an.vx >= 0 ? 1 : -1;
+  const hopY = (an.kind === "rabbit" || an.kind === "frog") ? Math.abs(Math.sin(an.hop))*4 : 0;
+  ctx.save();
+  ctx.translate(x + an.w/2, y + an.h/2 - hopY);
+  ctx.scale(facing, 1);
+
+  if (an.kind === "rabbit") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(0, 0, an.w/2, an.h/2, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#666"; ctx.lineWidth=1.5; ctx.stroke();
+    // Ears
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(-2, -an.h/2-2, 3, 8, 0.1, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4, -an.h/2-2, 3, 8, -0.1, 0, Math.PI*2); ctx.fill();
+    // Eye + nose
+    ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(an.w/3, -2, 1.6, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = an.accent; ctx.beginPath(); ctx.arc(an.w/2-1, 2, 1.5, 0, Math.PI*2); ctx.fill();
+    // Tail
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-an.w/2+1, 2, 4, 0, Math.PI*2); ctx.fill();
+  } else if (an.kind === "fox") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(0, 2, an.w/2, an.h/2, 0, 0, Math.PI*2); ctx.fill();
+    // Head
+    ctx.beginPath(); ctx.arc(an.w/3, -3, 9, 0, Math.PI*2); ctx.fill();
+    // Ears
+    ctx.beginPath();
+    ctx.moveTo(an.w/3-6, -10); ctx.lineTo(an.w/3-3, -16); ctx.lineTo(an.w/3, -10); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(an.w/3+3, -10); ctx.lineTo(an.w/3+6, -16); ctx.lineTo(an.w/3+9, -10); ctx.fill();
+    // Tail tip white
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.ellipse(-an.w/2-2, 0, 4, 5, 0.4, 0, Math.PI*2); ctx.fill();
+    // Eye
+    ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(an.w/3+3, -4, 1.5, 0, Math.PI*2); ctx.fill();
+    // Snout
+    ctx.fillStyle = an.accent; ctx.beginPath(); ctx.arc(an.w/3+8, -1, 1.6, 0, Math.PI*2); ctx.fill();
+  } else if (an.kind === "frog") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(0, 2, an.w/2, an.h/2, 0, 0, Math.PI*2); ctx.fill();
+    // Eyes
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-3, -an.h/2+2, 4, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -an.h/2+2, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(-3, -an.h/2+2, 1.6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -an.h/2+2, 1.6, 0, Math.PI*2); ctx.fill();
+    // Mouth
+    ctx.strokeStyle = "#1b5e20"; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(0, 4, 6, 0.2, Math.PI-0.2); ctx.stroke();
+  } else if (an.kind === "deer") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(-2, 4, an.w/2, an.h/3, 0, 0, Math.PI*2); ctx.fill();
+    // Head
+    ctx.beginPath(); ctx.ellipse(an.w/2-4, -6, 8, 9, 0, 0, Math.PI*2); ctx.fill();
+    // Antlers
+    ctx.strokeStyle = an.accent; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(an.w/2-2, -14); ctx.lineTo(an.w/2-2, -22); ctx.moveTo(an.w/2-2, -18); ctx.lineTo(an.w/2-7, -22);
+    ctx.moveTo(an.w/2-2, -18); ctx.lineTo(an.w/2+3, -22);
+    ctx.stroke();
+    // Legs
+    ctx.fillStyle = an.accent;
+    ctx.fillRect(-8, an.h/2-2, 3, 8);
+    ctx.fillRect(2, an.h/2-2, 3, 8);
+    ctx.fillRect(-an.w/2+2, an.h/2-2, 3, 8);
+    ctx.fillRect(an.w/2-6, an.h/2-2, 3, 8);
+    // Eye
+    ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(an.w/2-1, -7, 1.4, 0, Math.PI*2); ctx.fill();
+  } else if (an.kind === "bear") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(0, 4, an.w/2, an.h/2, 0, 0, Math.PI*2); ctx.fill();
+    // Head
+    ctx.beginPath(); ctx.arc(an.w/2-4, -6, 12, 0, Math.PI*2); ctx.fill();
+    // Ears
+    ctx.beginPath(); ctx.arc(an.w/2-12, -16, 4, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(an.w/2+4, -16, 4, 0, Math.PI*2); ctx.fill();
+    // Snout
+    ctx.fillStyle = "#bcaaa4";
+    ctx.beginPath(); ctx.ellipse(an.w/2+2, -3, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(an.w/2+5, -4, 1.4, 0, Math.PI*2); ctx.fill(); // nose
+    ctx.beginPath(); ctx.arc(an.w/2-1, -8, 1.6, 0, Math.PI*2); ctx.fill(); // eye
+  } else if (an.kind === "duck") {
+    ctx.fillStyle = an.color;
+    ctx.beginPath(); ctx.ellipse(0, 2, an.w/2, an.h/2, 0, 0, Math.PI*2); ctx.fill();
+    // Head
+    ctx.beginPath(); ctx.arc(an.w/2-4, -6, 8, 0, Math.PI*2); ctx.fill();
+    // Bill
+    ctx.fillStyle = an.accent;
+    ctx.beginPath(); ctx.ellipse(an.w/2+3, -4, 5, 3, 0, 0, Math.PI*2); ctx.fill();
+    // Eye
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(an.w/2-3, -7, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawTent(t) {
+  const tx = t.x, ty = t.y;
+  // tent body (triangle)
+  ctx.fillStyle = "#ef5350";
+  ctx.beginPath();
+  ctx.moveTo(tx, ty);
+  ctx.lineTo(tx + 30, ty - 50);
+  ctx.lineTo(tx + 60, ty);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#b71c1c"; ctx.lineWidth = 3; ctx.stroke();
+  // door
+  ctx.fillStyle = "#4e342e";
+  ctx.beginPath();
+  ctx.moveTo(tx + 22, ty);
+  ctx.lineTo(tx + 30, ty - 28);
+  ctx.lineTo(tx + 38, ty);
+  ctx.closePath();
+  ctx.fill();
+  // pole top
+  ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(tx+30, ty-50); ctx.lineTo(tx+30, ty-58); ctx.stroke();
+  ctx.fillStyle = "#ffeb3b";
+  ctx.beginPath(); ctx.arc(tx+30, ty-60, 3, 0, Math.PI*2); ctx.fill();
+
+  // sign
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.fillRect(tx - 20, ty - 90, 100, 22);
+  ctx.strokeStyle = "#333"; ctx.strokeRect(tx - 20, ty - 90, 100, 22);
+  ctx.fillStyle = "#333"; ctx.font = "13px Comic Sans MS";
+  ctx.fillText("Press E to sleep", tx - 16, ty - 74);
+}
+
+function drawGirl(g, isActive) {
+  const x = g.x, y = g.y;
+  const cx = x + g.w/2;
+  const bob = Math.sin(g.walkT) * 1.5;
+  ctx.save();
+  ctx.translate(cx, y + g.h/2 + bob);
+  ctx.scale(g.facing, 1);
+
+  // Backpack (behind body)
+  ctx.fillStyle = "#6d4c41";
+  ctx.fillRect(-g.w/2 - 4, -8, 8, 18);
+  ctx.strokeStyle = "#3e2723"; ctx.lineWidth=2;
+  ctx.strokeRect(-g.w/2 - 4, -8, 8, 18);
+  // Strap to top of pack
+  ctx.fillStyle = "#5d4037";
+  ctx.fillRect(-g.w/2 - 4, -10, 8, 4);
+
+  // Legs
+  ctx.fillStyle = "#f5b27a";
+  const legSwing = Math.sin(g.walkT) * 4;
+  ctx.fillRect(-5, g.h/2 - 12, 4, 12 + legSwing);
+  ctx.fillRect(2, g.h/2 - 12, 4, 12 - legSwing);
+  // Shoes
+  ctx.fillStyle = "#c2185b";
+  ctx.fillRect(-6, g.h/2 - 2 + (legSwing>0?legSwing:0), 6, 3);
+  ctx.fillRect(1, g.h/2 - 2 + (legSwing<0?-legSwing:0), 6, 3);
+
+  // Dress (puffy)
+  ctx.fillStyle = g.dress;
+  ctx.beginPath();
+  ctx.moveTo(-g.w/2, g.h/2 - 12);
+  ctx.quadraticCurveTo(-g.w/2 - 4, g.h/2 - 22, -6, g.h/2 - 30);
+  ctx.lineTo(6, g.h/2 - 30);
+  ctx.quadraticCurveTo(g.w/2 + 4, g.h/2 - 22, g.w/2, g.h/2 - 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 1.2; ctx.stroke();
+
+  // Arms
+  ctx.fillStyle = "#f5b27a";
+  ctx.beginPath();
+  ctx.ellipse(-9, g.h/2 - 26, 3, 7, 0.3, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(9, g.h/2 - 26, 3, 7, -0.3, 0, Math.PI*2);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = "#f5b27a";
+  ctx.beginPath();
+  ctx.arc(0, g.h/2 - 36, 8, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = "#333"; ctx.lineWidth=1; ctx.stroke();
+
+  // Hair
+  ctx.fillStyle = g.hair;
+  if (g.name === "Lehvi") {
+    // shoulder-length orange hair
+    ctx.beginPath();
+    ctx.ellipse(0, g.h/2 - 33, 9, 11, 0, 0, Math.PI*2);
+    ctx.fill();
+    // bangs cut head
+    ctx.fillStyle = "#f5b27a";
+    ctx.beginPath();
+    ctx.arc(0, g.h/2 - 36, 7, 0, Math.PI*2);
+    ctx.fill();
+    // pigtail
+    ctx.fillStyle = g.hair;
+    ctx.beginPath(); ctx.ellipse(-9, g.h/2 - 28, 3, 8, 0.2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(9, g.h/2 - 28, 3, 8, -0.2, 0, Math.PI*2); ctx.fill();
+  } else {
+    // long flowing black hair
+    ctx.beginPath();
+    ctx.moveTo(-9, g.h/2 - 38);
+    ctx.quadraticCurveTo(-14, g.h/2 - 22, -10, g.h/2 - 14);
+    ctx.lineTo(-6, g.h/2 - 18);
+    ctx.lineTo(-2, g.h/2 - 32);
+    ctx.lineTo(2, g.h/2 - 32);
+    ctx.lineTo(6, g.h/2 - 18);
+    ctx.lineTo(10, g.h/2 - 14);
+    ctx.quadraticCurveTo(14, g.h/2 - 22, 9, g.h/2 - 38);
+    ctx.closePath();
+    ctx.fill();
+    // bangs
+    ctx.beginPath();
+    ctx.ellipse(0, g.h/2 - 41, 8, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Tiara (blue crown like in drawing)
+  ctx.fillStyle = "#1976d2";
+  ctx.beginPath();
+  ctx.moveTo(-7, g.h/2 - 42);
+  ctx.lineTo(-5, g.h/2 - 47);
+  ctx.lineTo(-3, g.h/2 - 43);
+  ctx.lineTo(0, g.h/2 - 49);
+  ctx.lineTo(3, g.h/2 - 43);
+  ctx.lineTo(5, g.h/2 - 47);
+  ctx.lineTo(7, g.h/2 - 42);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#0d47a1"; ctx.lineWidth=1; ctx.stroke();
+
+  // Face
+  ctx.fillStyle = "#000";
+  ctx.beginPath(); ctx.arc(-2.5, g.h/2 - 36, 1, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(2.5, g.h/2 - 36, 1, 0, Math.PI*2); ctx.fill();
+  // cheeks
+  ctx.fillStyle = "rgba(244,143,177,0.7)";
+  ctx.beginPath(); ctx.arc(-4, g.h/2 - 33, 1.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4, g.h/2 - 33, 1.5, 0, Math.PI*2); ctx.fill();
+  // smile
+  ctx.strokeStyle = "#000"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(0, g.h/2 - 34, 2, 0.2, Math.PI - 0.2); ctx.stroke();
+
+  // Active highlight ring
+  if (isActive) {
+    ctx.strokeStyle = "#ffd54f"; ctx.lineWidth = 2;
+    ctx.setLineDash([4,3]);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, g.w/2 + 6, g.h/2 + 8, 0, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Name tag
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(-22, -g.h/2 - 16, 44, 14);
+    ctx.strokeStyle = "#333"; ctx.lineWidth=1;
+    ctx.strokeRect(-22, -g.h/2 - 16, 44, 14);
+    ctx.scale(g.facing, 1); // un-mirror text
+    ctx.fillStyle = "#333"; ctx.font = "11px Comic Sans MS"; ctx.textAlign = "center";
+    ctx.fillText(g.name, 0, -g.h/2 - 5);
+    ctx.textAlign = "left";
+  }
+
+  ctx.restore();
+}
+
+// ---------- HUD ----------
+function updateHUD() {
+  const t = state.time;
+  const hh = Math.floor(t);
+  const mm = Math.floor((t - hh) * 60).toString().padStart(2,"0");
+  const found = level.lakes.filter(l => l.found).length;
+  const total = level.lakes.length;
+  const allFound = found === total;
+  const partOfDay = (t >= 6 && t < 19) ? "☀ Day" : "🌙 Night";
+  document.getElementById("hud").innerHTML = `
+    <div><b>Level ${state.level}</b> · Day ${state.day}/${state.maxDays}</div>
+    <div>${partOfDay} · ${hh}:${mm}</div>
+    <div>Lakes: ${found} / ${total} ${allFound ? "✓" : ""}</div>
+    <div>Playing: <b>${girls[state.active].name}</b></div>
+    ${allFound && (t < 6.5 || t >= 19) ? "<div style='color:#2e7d32'>Press E by the tent!</div>" : ""}
+  `;
+}
+
+// ---------- MAIN LOOP ----------
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!state.paused) {
+    update(dt);
+    render();
+    updateHUD();
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------- INIT ----------
+document.getElementById("start-btn").onclick = () => {
+  document.getElementById("title-screen").style.display = "none";
+  state.paused = false;
+};
+document.getElementById("restart-btn").onclick = () => {
+  document.getElementById("end-screen").style.display = "none";
+  state.level = 1; state.day = 1; state.time = 8.0;
+  state.ended = false;
+  level = buildLevel(1);
+  girls = [
+    makeGirl(120, "Lehvi", "#ec407a", "#f57c00"),
+    makeGirl(160, "Leah",  "#1e88e5", "#212121"),
+  ];
+  state.camera = 0;
+};
+
+state.paused = false;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
